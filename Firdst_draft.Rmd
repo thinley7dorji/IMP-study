@@ -1,0 +1,364 @@
+---
+title: "SPIGO"
+output: html_document
+date: "2026-07-22"
+---
+
+```{r Packages, include=FALSE}
+library(dplyr)
+library(ape)
+library(tidyverse)
+library(forcats)
+library(ggtree)
+library(babette)
+library(ggplot2)
+library(table1)
+library(phangorn)
+library(treeio)
+library(ggnewscale)
+library(khroma)
+
+
+setwd("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/")
+```
+
+
+
+```{r Data loading}
+global <- read.delim("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/Global_IMP_11_09_2026.tsv") |>
+  subset(country=="Australia") # |> select(strain, biosample, date, country, region, isolation.source, isolation.type)
+
+
+amr_all <- readxl::read_xlsx("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/combined_reportable_amr_mechanisms.xlsx") |> 
+  select(isolate=Isolate, amr="Reportable AMR genes") #|> subset(amr !="CPase_16S_mcr_NEG")
+
+metadata <- readxl::read_xlsx(
+  "/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Victorian/zDates_global/metadata_out/metadata_combined.xlsx") |>
+  dplyr::mutate(date = ifelse(is.na(date), date2, date),
+    amr_isolate = dplyr::case_when(
+      run %in% amr_all$isolate ~ as.character(run),
+      biosample %in% amr_all$isolate ~ as.character(biosample),
+      TRUE ~ NA_character_)) |>
+  dplyr::select(biosample, amr_isolate, date, source,
+    instrument = instrument_model_desc) #|>
+  #dplyr::left_join(global, by = "biosample") |> 
+     #dplyr::filter(!startsWith(biosample, c("SAMN3106599", "SAMN3106604")))
+
+
+sra <- read.csv("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/SRA_AUS.tab", header = TRUE, sep = "\t")
+
+vic_data <- read_csv("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Victorian/Vic_IMP.csv") |> select(-c(V4:V10, db_version)) |> select(- "...1")
+
+
+
+species <- readxl::read_xlsx("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/combined_speciation.xlsx") |>
+  dplyr::rename(species = `Match 1 (reads)`) |>
+  dplyr::filter(!Isolate %in% c("SRR13501354", "SRR23384557", "SRR23384559", "SRR23384540", "SRR23384721", "SRR9696925",
+      "SRR13501351", "SRR23384859", "SRR23384669")) |>
+  dplyr::mutate(genus = sub("\\s+.*$", "", trimws(species))) |>
+  dplyr::relocate(genus, .after = species) |> select(isolate = Isolate, species, genus) |> 
+  left_join(amr_all, by = "isolate") |> left_join(sra, by=c("isolate"="Run")) |> 
+  mutate(BioSample = ifelse(is.na(BioSample), isolate, BioSample)) |> left_join(metadata, by=c("isolate"="biosample")) |> 
+  left_join(zont_sample_id, by=c("isolate"="V1")) |> 
+  dplyr::mutate(platform = dplyr::coalesce(ont, instrument),
+                platform = dplyr::recode(platform, "OXFORD_NANOPORE" = "ONT")) |> 
+  left_join(mlst, by=c("isolate"="sample")) |> 
+   select(-c(instrument, ont, amr1, isolation.source)) |> 
+  select(isolate, BioSample, species, genus, scheme, ST, amr, 
+    date=date.x, 
+    country, region,
+    source, type=isolation.type, platform) |> 
+  mutate(region=ifelse(isolate %in% vic_data$accession, "Vic", region)) |> 
+  mutate(country=ifelse(isolate %in% vic_data$accession, "Australia", country)) |> 
+  left_join(select(vic_data, c(accession, travel=Surv_Travel_countries, present=Surv_presentation)), by=c("isolate"="accession")) 
+  
+  
+
+
+
+
+
+Aus_run <- read.csv("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/report/summary.tsv", header = TRUE, sep = "\t") |> select(-c(QA, is_control, filesize)) |> subset(Depth >=30) |>  
+  left_join(sra, by = c("Isolate" = "Run")) |>
+  mutate(match_accession = ifelse(
+      Isolate %in% metadata$amr_isolate, Isolate, BioSample)) |>
+  relocate(c(BioSample, match_accession), .after = Isolate) |> filter(!grepl(":", Species)) |> 
+  rename_with(tolower) |> left_join(amr_all, by = "isolate") |> 
+  left_join(metadata, by = c("isolate" = "amr_isolate")) 
+
+mlst <- readxl::read_xlsx("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/zmlst_combined.xlsx") |> select(sample, scheme=species, ST)
+
+mob_typer <- read.csv(
+  "/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/zCombined_mobtyper.tab", sep = "\t",
+  header = TRUE) |>
+  dplyr::filter(rep_type.s. != "-") |>
+  dplyr::mutate(sample = sub(":.*", "", sample_id)) |>
+  dplyr::relocate(sample, .before = sample_id)
+
+contig_report <- read.csv("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/zCombined_contigreport.tab", sep = "\t", header = TRUE) |> 
+  filter(molecule_type !="chromosome", rep_type.s. != "-") |> mutate(contig = word(contig_id, 1)) |> 
+  relocate(contig, .after = contig_id) |> rename_with(tolower)
+
+imp_plasmid <- read.csv("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/Australian/imp_plasmid_summary.tsv", sep = "\t", header = TRUE) |> select(1:2) |> 
+   mutate(imp_contig = str_trim(imp_contig)) %>%
+  left_join(contig_report, by = c("sample" = "sample_id")) |> 
+  subset(imp_contig %in% contig) 
+
+```
+
+
+
+
+
+
+
+### Figures
+
+```{r IMP-fig-species}
+
+
+species_colors <- c(
+  "Klebsiella pneumoniae"   = "#0072B2",
+  "Escherichia coli"        = "#E69F00",
+  "Enterobacter hormaechei" = "#009E73",
+  "Serratia marcescens"     = "#CC79A7",
+  "Pseudomonas aeruginosa"  = "#D55E00",
+  "Citrobacter tructae"     = "#00BFC4",
+  "Klebsiella variicola"    = "#F0E442",
+  "Klebsiella michiganensis" = "#CC2F8A",
+  "Klebsiella oxytoca"      = "#4B0082",
+  "Enterobacter asburiae"   = "#8C510A",
+  "Citrobacter freundii"    = "#7F7F7F",
+  "Klebsiella aerogenes"    = "#56B4E9",
+  "Proteus mirabilis"       = "#003366")
+
+
+species_counts <- species |>
+  count(species, sort = TRUE) |>
+  slice_max(n, n = 10, with_ties = FALSE) |>
+  mutate(prop = n / nrow(Aus_run),
+    species = forcats::fct_reorder(species, n))
+
+fig_species <- ggplot(species_counts, aes(x = n, y = species, fill = species)) +
+  geom_col() +
+  geom_text(aes(label = scales::percent(prop, accuracy = 0.1)),
+    hjust = -0.1, size = 3.2) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  scale_fill_manual(values = species_colors, guide = "none") +
+  labs(x = "Number of isolates", y = NULL,
+    title = "Top 10 IMP-CPO species") +
+  theme_classic() +
+  theme(axis.text = element_text(size = 13),
+    plot.title = element_text(size = 14, hjust = 0.5),
+    plot.title.position = "plot")
+
+fig_species
+
+```
+
+
+```{r Mashtree}
+mash <- read.tree("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/All/mash_imp.dnd")
+
+p <- ggtree(midpoint(mash)) 
+
+tree_data <- data_clean |> select(accession, species, imp_variant, co_genes,year) |> column_to_rownames(var = "accession")
+
+tree_species <- tree_data |> select(species)
+tree_variant <- tree_data |> select(imp_variant)
+tree_genes   <- tree_data |> select(co_genes)
+tree_year    <- tree_data |> select(year) |> mutate(year=as.factor(year))
+
+
+##
+colnames(tree_species) <- "Species"
+colnames(tree_variant) <- "IMP variant"
+colnames(tree_genes) <- "Co-genes"
+colnames(tree_year) <- "Year"
+
+p1 <- gheatmap(p, tree_species,
+               offset = 0.001, width = 0.03,
+               colnames_angle = 90, colnames_offset_y = -19,
+               hjust = 0, font.size = 5) +
+    scale_fill_manual(values = species_colors, name = "Species") +
+    new_scale_fill()
+
+
+p2 <- gheatmap(p1, tree_variant,
+         offset = 0.009, width = 0.03,
+         colnames_angle = 90, 
+         colnames_offset_y = -19, 
+         hjust = 0, 
+         font.size = 5) + 
+         ggsci::scale_fill_lancet(name="IMP variants")+
+        new_scale_fill()
+
+p3 <- gheatmap(p2, tree_genes,
+               offset = 0.017, width = 0.03,
+               colnames_angle = 90, 
+               colnames_offset_y = -19,
+               hjust = 0, font.size = 5) +
+    ggsci::scale_fill_bmj(name="Co-genes") + new_scale_fill()
+
+p3
+
+p4 <- gheatmap(p3, tree_year,
+               offset = 0.025, 
+               width = 0.03,
+               colnames_angle = 90, 
+               colnames_offset_y = -19,
+               hjust = 0, font.size = 5) +
+    ggsci:::scale_fill_igv( name = "Year")
+
+p_heatmap <- p4 +
+    theme(
+        legend.position = "right",
+        legend.title = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 8),
+        plot.margin = margin(t = 10, r = 60, b = 40, l = 10)) +
+    ylim(NA, max(p$data$y) * 1.15)
+p_heatmap
+
+```
+
+```{r IMP-fig-temporal}
+
+data_clean <- Aus_run |>
+    select(year, amr) |>
+    mutate(imp_variant = stringr::str_extract(amr, "IMP-[0-9]+"))
+
+imp_colors <- c(
+  "IMP-4"  = "#1B9E77",
+  "IMP-26" = "#D95F02",
+  "IMP-7"  = "#7570B3",
+  "IMP-1"  = "#E7298A",
+  "IMP-62" = "#66A61E",
+  "IMP-14" = "#E6AB02",
+  "IMP-15" = "#A6761D")
+
+fig_temporal <- ggplot(data_clean, aes(x = year, fill = imp_variant)) +
+  geom_bar() +
+  scale_x_continuous(breaks = scales::breaks_width(1)) +
+  scale_fill_manual(values = imp_colors) +
+  labs(x = "Year of collection",
+    y = "Number of isolates",
+    fill = "IMP variant") + 
+  theme_classic() +
+  theme(plot.title.position = "plot",
+    plot.title = element_text(hjust = 0.5))
+
+fig_temporal
+
+```
+
+```{r IMP species temporal}
+
+species <- Aus_run |>
+  count(year, species, name = "n")
+
+fig_variant <- ggplot(species, aes(x = factor(year), y = n, fill = species)) +
+  geom_col() +
+  scale_fill_manual(values = species_colors) +
+  labs(x = "Year", y = "Number of isolates", fill = "Species") +
+  theme_classic()
+
+fig_variant
+```
+
+```{r IMP-fig-st}
+
+fig_st <- ST |>
+  slice_max(n_typed, n = 10, with_ties = FALSE) |>
+  ggplot(aes(x = n_typed, y = n_STs, color = species)) +
+  geom_abline(
+    slope = 1, intercept = 0,
+    linetype = "dashed", color = "grey60") +
+  geom_point(size = 3) +
+  scale_color_manual(values = species_colors) +
+  labs(
+    x = "Isolates with ST assigned",
+    y = "Distinct STs",
+    color = "Species",
+    title = "Sequence type diversity: top 10 species",
+    subtitle = "Points below the dashed line indicate repeated STs") +
+  theme_classic()
+
+fig_st
+```
+
+```{r IMP-fig-presentation}
+
+fig_presentation <- ggplot(data_clean, aes(y = fct_rev(species), fill = Presentation)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = presentation_col) +
+  labs(x = "Proportion of isolates", y = NULL, fill = "Clinical presentation",
+       title = "Clinical presentation by species") + theme_classic()
+fig_presentation
+
+```
+
+### Statistical analysis
+
+Species has many levels with small counts, so species with fewer than 5
+isolates are lumped into "Other (n<5 each)" before testing, to reduce (but not
+eliminate) sparse cells. Expected cell counts are well below 5 in most cells of
+the raw 13x3 table, so a chi-square test is not valid here; Fisher's exact
+test (Monte Carlo p-value, since the table is too large for exact enumeration)
+is used instead for both comparisons below. Given only two planned tests, no
+multiple-testing correction is applied, but results should be treated as
+hypothesis-generating given the sparse cell counts.
+
+```{r IMP-stats-presentation}
+data_test <- data_clean |>
+  mutate(Species_grp = fct_lump_min(species, min = 5, other_level = "Other (n<5 each)"))
+
+tab_presentation <- table(data_test$Species_grp, data_test$Presentation)
+tab_presentation
+
+fisher_presentation <- fisher.test(tab_presentation, simulate.p.value = TRUE, B = 10000)
+fisher_presentation
+
+chi_presentation <- suppressWarnings(chisq.test(tab_presentation, simulate.p.value = TRUE, B = 10000))
+cramers_v_presentation <- sqrt(chi_presentation$statistic / (sum(tab_presentation) * (min(dim(tab_presentation)) - 1)))
+cramers_v_presentation
+```
+
+
+
+```{r IMP-stats-variant}
+data_test <- data_test |>
+  mutate(imp4 = if_else(imp_variant == "IMP-4", "IMP-4", "Other IMP variant"))
+
+tab_variant <- table(data_test$Species_grp, data_test$imp4)
+tab_variant
+
+fisher_variant <- fisher.test(tab_variant, simulate.p.value = TRUE, B = 10000)
+fisher_variant
+```
+
+IMP variant is strongly associated with species (Fisher's exact Monte Carlo
+p = `r signif(fisher_variant$p.value, 2)`): every species except
+*Pseudomonas aeruginosa* carries almost exclusively IMP-4 (117/122 non-*P.
+aeruginosa* isolates), whereas *P. aeruginosa* carries a mix of variants
+(IMP-7, IMP-1, IMP-14, IMP-15, IMP-26, IMP-62; only 3/11 IMP-4). This likely
+reflects species-associated mobile genetic element/integron backgrounds rather
+than a direct biological interaction between species and enzyme variant, and
+should be interpreted descriptively.
+
+
+
+```{r AMR genes location}
+
+amr_loc = read.delim("/Users/tddorji/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/Centre_Pathogen_genomics/Vic_IMP/All/zall_mobsuite_IMP_contig_report.txt")
+
+```
+
+
+```{r Enterobacter Hormacgei}
+
+entero <- species |> subset(species=="Enterobacter hormaechei") 
+
+
+
+
+```

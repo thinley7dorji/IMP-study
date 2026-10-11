@@ -86,3 +86,23 @@ DRR065577       contig00098     339     1076    blaIMP-4        plasmid AA002   
 DRR065578       contig00087     760     1497    blaIMP-4        plasmid AA002   1601                                                               
 DRR065598       contig00048     359     1096    blaIMP-4        plasmid AA860   3389                                                               
 ```
+
+## For plasmid hits, which plasmid type?
+
+```
+awk -F'\t' -v OFS='\t' '
+FNR==NR {
+  if (/primary_cluster_id/) { for (i=1;i<=NF;i++) {
+        if ($i=="sample_id")          s=i
+        if ($i=="primary_cluster_id") k=i
+        if ($i=="rep_type(s)")        r=i
+        if ($i=="predicted_mobility") p=i }
+      next }
+  smp=$s; sub(/:.*/, "", smp)                     # strip any ":cluster" suffix from sample_id
+  info[smp"|"$k]=$r OFS $p; next }
+{ key=$1"|"$7; print $0, (key in info ? info[key] : "-" OFS "-") }
+' zcombined_mobtyper.tab imp_location.tab > imp_location_full.tab
+
+column -t imp_location_full.tab | head -20
+
+```
